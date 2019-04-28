@@ -17,6 +17,7 @@ public class ServerWorker implements Runnable {
         }
 
         // Handle data here.
+        String input = new String(dataCopy);
 
         synchronized (_queue) {
             _queue.add(new ServerDataEvent(server, socket, dataCopy));
