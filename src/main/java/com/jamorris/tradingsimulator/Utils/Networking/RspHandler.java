@@ -16,6 +16,8 @@ public class RspHandler {
             } catch (InterruptedException e) { }
         }
 
-        return new String(_rsp);
+        String response = new String(_rsp);
+        _rsp = null;
+        return response;
     }
 }

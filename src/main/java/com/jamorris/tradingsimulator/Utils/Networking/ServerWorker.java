@@ -7,11 +7,17 @@ import java.util.LinkedList;
 import java.util.List;
 
 public class ServerWorker implements Runnable {
-    protected List<ServerDataEvent> _queue = new LinkedList<>();
+    private final List<ServerDataEvent> _queue = new LinkedList<>();
+    private final Object lock = new Object();
 
     public void processData(Server server, SocketChannel socket, byte[] data, int count) {
         byte[] dataCopy = new byte[count];
-        System.arraycopy(data, 0, dataCopy, 0, count);
+        synchronized (lock) {
+            System.arraycopy(data, 0, dataCopy, 0, count);
+        }
+
+        // Handle data here.
+
         synchronized (_queue) {
             _queue.add(new ServerDataEvent(server, socket, dataCopy));
             _queue.notify();
@@ -33,7 +39,7 @@ public class ServerWorker implements Runnable {
                 dataEvent = _queue.remove(0);
             }
             MyLogger.out("Message being processed");
-            //dataEvent._server.send(dataEvent._socketChannel, dataEvent._data);
+            dataEvent._server.send(dataEvent._socketChannel, dataEvent._data);
         }
     }
 }

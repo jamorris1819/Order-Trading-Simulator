@@ -19,10 +19,10 @@ public class Client implements Runnable {
     private long _id;
     private Selector _selector;
     private ByteBuffer _readBuffer = ByteBuffer.allocate(1024);
-
-    private List<ChangeRequest> _changeRequests = new LinkedList<>();
-    private Map _pendingData = new HashMap();
-    private Map _rspHandlers = Collections.synchronizedMap(new HashMap());
+    private SocketChannel _socketChannel = null;
+    private final List<ChangeRequest> _changeRequests = new LinkedList<>();
+    private final Map<SocketChannel, List> _pendingData = new HashMap<>();
+    private final Map<SocketChannel, RspHandler> _rspHandlers = Collections.synchronizedMap(new HashMap());
 
     public Client(InetAddress hostAddress, int port) throws IOException {
         _hostAddress = hostAddress;
@@ -61,12 +61,10 @@ public class Client implements Runnable {
                         finishConnection(key);
                     }
                     else if(key.isReadable()) {
-
-                        MyLogger.out("readable");
+                        read(key);
                     }
                     else if(key.isWritable()) {
-
-                        MyLogger.out("writable");
+                        write(key);
                     }
                 }
             }
@@ -76,6 +74,11 @@ public class Client implements Runnable {
         }
     }
 
+    /**
+     * Initiate a socket channel and connects.
+     * @return SocketChannel
+     * @throws IOException
+     */
     private SocketChannel initiateConnection() throws IOException {
         // Create a non-blocking socket channel.
         SocketChannel socketChannel = SocketChannel.open();
@@ -94,6 +97,13 @@ public class Client implements Runnable {
         return socketChannel;
     }
 
+    private SocketChannel getSocketChannel() throws IOException {
+        if(_socketChannel == null) {
+            _socketChannel = initiateConnection();
+        }
+        return _socketChannel;
+    }
+
     private void finishConnection(SelectionKey key) throws IOException {
         SocketChannel socketChannel = (SocketChannel)key.channel();
 
@@ -108,8 +118,28 @@ public class Client implements Runnable {
         key.interestOps(SelectionKey.OP_WRITE);
     }
 
+    /**
+     * Process any change requests.
+     * @throws ClosedChannelException
+     */
     private void processChanges() throws ClosedChannelException {
-
+        // Process pending changes.
+        synchronized (_changeRequests) {
+            Iterator changes = _changeRequests.iterator();
+            while(changes.hasNext()) {
+                ChangeRequest request = (ChangeRequest) changes.next();
+                switch(request._type) {
+                    case ChangeRequest.CHANGEOPS:
+                        SelectionKey key = request._socket.keyFor(_selector);
+                        key.interestOps(request._ops);
+                        break;
+                    case ChangeRequest.REGISTER:
+                        request._socket.register(_selector, request._ops);
+                        break;
+                }
+            }
+            this._changeRequests.clear();
+        }
     }
 
     public void send(byte[] data, RspHandler handler) throws IOException {
@@ -117,7 +147,8 @@ public class Client implements Runnable {
         SocketChannel socket = initiateConnection();
 
         // Register the response handler.
-        _rspHandlers.put(socket, handler);
+        if(!_rspHandlers.containsKey(socket))
+            _rspHandlers.put(socket, handler);
 
         // Queue data to be written.
         synchronized (_pendingData) {
@@ -131,5 +162,74 @@ public class Client implements Runnable {
 
         // Finally wake up our selecting thread so that it can make the required changes.
         _selector.wakeup();
+    }
+
+    private void read(SelectionKey key) throws IOException {
+        SocketChannel socketChannel = (SocketChannel)key.channel();
+
+        // Clear out the buffer so that it's ready for more.
+        _readBuffer.clear();
+
+        // Attempt to read from the channel.
+        int numRead = -1;
+        try {
+            numRead = socketChannel.read(_readBuffer);
+        } catch (IOException e){
+            // Connected entity forcibly shut the connection.
+            // Close the channel.
+            key.cancel();
+            socketChannel.close();
+            return;
+        }
+
+        if(numRead == -1) {
+            // Remote entity shut the socket properly.
+            // We will do the same.
+            key.channel().close();
+            key.cancel();
+            return;
+        }
+
+        handleResponse(socketChannel, _readBuffer.array(), numRead, key);
+    }
+
+    private void write(SelectionKey key) throws IOException {
+        SocketChannel socketChannel = (SocketChannel) key.channel();
+
+        synchronized (_pendingData){
+            List queue = (List)_pendingData.get(socketChannel);
+
+            // Write until there is no more data available.
+            while(!queue.isEmpty()) {
+                ByteBuffer buffer = (ByteBuffer)queue.get(0);
+                socketChannel.write(buffer);
+                if(buffer.remaining() > 0) {
+                    // Socket's buffer is full.
+                    break;
+                }
+                queue.remove(0);
+            }
+
+            if(queue.isEmpty()) {
+                // All data has been written, so this socket no longer needs to write.
+                key.interestOps(SelectionKey.OP_READ);
+            }
+        }
+    }
+
+    private void handleResponse(SocketChannel socketChannel, byte[] data, int numRead, SelectionKey key) throws IOException {
+        // Make a copy of the data before handing it to the client.
+        byte[] rspData = new byte[numRead];
+        System.arraycopy(data, 0, rspData, 0, numRead);
+
+        // Look up the handler for this channel.
+        RspHandler handler = (RspHandler)_rspHandlers.get(socketChannel);
+
+        // Pass the response to it.
+        if(handler.handleResponse(rspData)) {
+            // The handler is finished. Close connection.
+            socketChannel.close();
+            socketChannel.keyFor(_selector).cancel();
+        }
     }
 }
